@@ -1,0 +1,86 @@
+# 楽天GOLD 店舗トップ用データの自動更新
+# 役割: 1日1回、既存GASから商品データJSONを取得し、FTPで楽天GOLDに書き出す。
+#       ブラウザ(rankingheader.js)はGASを呼ばず、このGOLD上の静的JSONを読む。
+#
+# 置き場所: リポジトリ内の  .github/workflows/update-data.yml
+#
+# 必要なSecrets（GitHub: Settings → Secrets and variables → Actions → New repository secret）:
+#   GAS_URL       … GASウェブアプリのURL（.../exec まで。末尾に ? やパラメータは付けない）
+#   FTP_HOST      … 楽天GOLDのFTPホスト名（FFFTPの「ホスト名」と同じ）
+#   FTP_USER      … FTPユーザー名
+#   FTP_PASSWORD  … FTPパスワード
+#   FTP_DIR       … 書き出し先ディレクトリ。GOLDの gold/mrmax-r 直下に data を作る想定。
+#                   例: FFFTPで普段アップしている場所が gold/mrmax-r なら "mrmax-r/data"
+#                   （実際の値はFFFTPの接続先パスに合わせてください）
+
+name: Update storefront data
+
+on:
+  schedule:
+    # 毎日 UTC 20:30 = JST 翌 5:30 に実行。
+    # GAS側の saveSnapshot / updateLiveItemList のトリガーより後に回すこと。
+    - cron: "30 20 * * *"
+  workflow_dispatch: {} # 手動実行も可能（Actionsタブから Run workflow）
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch JSON from GAS
+        env:
+          GAS_URL: ${{ secrets.GAS_URL }}
+        run: |
+          set -e
+          mkdir -p dist
+
+          # $1 = GASに付けるクエリ, $2 = 出力ファイル名
+          fetch() {
+            for i in 1 2 3; do
+              if curl -fsSL --max-time 180 "${GAS_URL}$1" -o "dist/$2"; then
+                # 中身が JSON 配列([...]) で始まるかを検査。
+                # GASがエラー時に返す {"error":...} を弾き、壊れたデータでGOLDを上書きしないため。
+                first=$(head -c1 "dist/$2" | tr -d '[:space:]')
+                if [ "$first" = "[" ]; then
+                  echo "OK: $2 ($(wc -c < "dist/$2") bytes)"
+                  return 0
+                fi
+                echo "not-an-array (retry $i): $2 -> $(head -c120 "dist/$2")"
+              else
+                echo "curl failed (retry $i): $2"
+              fi
+              sleep 15
+            done
+            echo "FAILED: $2"
+            return 1
+          }
+
+          fetch "?type=ranking"                    ranking.json
+          fetch "?t=$(date +%s)"                   items.json
+          fetch "?type=livecodes"                  livecodes.json
+
+      - name: Upload to Rakuten GOLD via FTP
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_DIR: ${{ secrets.FTP_DIR }}
+        run: |
+          set -e
+          sudo apt-get update -qq && sudo apt-get install -y lftp
+
+          # FFFTPが「FTPS(暗号化)」で接続している場合は、下の2行のコメントを入れ替えてください:
+          #   平文FTP  … set ftp:ssl-allow no;
+          #   FTPS(暗号化) … set ftp:ssl-allow yes; set ssl:verify-certificate no;
+          lftp -c "
+            set ftp:ssl-allow no;
+            set net:max-retries 2;
+            set net:timeout 30;
+            open -u \"$FTP_USER\",\"$FTP_PASSWORD\" \"$FTP_HOST\";
+            mkdir -f -p \"$FTP_DIR\";
+            cd \"$FTP_DIR\";
+            put dist/ranking.json   -o ranking.json;
+            put dist/items.json     -o items.json;
+            put dist/livecodes.json -o livecodes.json;
+            bye
+          "
+          echo "アップロード完了: ranking.json / items.json / livecodes.json"
