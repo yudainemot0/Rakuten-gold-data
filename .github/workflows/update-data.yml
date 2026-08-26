@@ -75,6 +75,7 @@ jobs:
             set ftp:ssl-allow yes;
             set ftp:ssl-force yes;
             set ssl:verify-certificate no;
+            set ftp:passive-mode true;
             set net:max-retries 2;
             set net:timeout 30;
             open -u \"$FTP_USER\",\"$FTP_PASSWORD\" \"$FTP_HOST\";
