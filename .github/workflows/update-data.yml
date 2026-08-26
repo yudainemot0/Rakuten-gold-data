@@ -72,7 +72,8 @@ jobs:
           #   平文FTP  … set ftp:ssl-allow no;
           #   FTPS(暗号化) … set ftp:ssl-allow yes; set ssl:verify-certificate no;
           lftp -c "
-                        set ftp:ssl-allow yes;
+            set ftp:ssl-allow yes;
+            set ftp:ssl-force yes;
             set ssl:verify-certificate no;
             set net:max-retries 2;
             set net:timeout 30;
