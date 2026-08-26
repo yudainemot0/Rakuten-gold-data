@@ -71,7 +71,7 @@ jobs:
           # FFFTPが「FTPS(暗号化)」で接続している場合は、下の2行のコメントを入れ替えてください:
           #   平文FTP  … set ftp:ssl-allow no;
           #   FTPS(暗号化) … set ftp:ssl-allow yes; set ssl:verify-certificate no;
-          lftp -c "
+          lftp -d -c "
             set ftp:ssl-allow yes;
             set ftp:ssl-force yes;
             set ssl:verify-certificate no;
