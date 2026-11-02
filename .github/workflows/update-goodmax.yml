@@ -1,0 +1,104 @@
+# GOOD Max! 特集ページ用データの自動更新（1時間ごと）
+# 役割: 既存GASの ?type=goodmax から商品データJSONを取得し、リポジトリの data/goodmax.json にコミットする。
+#       コミットされたJSONは GitHub Pages が配信し、特集ページ(goodmax.html)はそれを読む。
+#       公開URL: https://yudainemot0.github.io/Rakuten-gold-data/data/goodmax.json
+#
+# 置き場所: .github/workflows/update-goodmax.yml
+# 必要なSecrets: GAS_URL（既存の update-data.yml と同じもの。.../exec まで。パラメータは付けない）
+#
+# 失敗したとき（GASのエラー・不正なJSON・全カテゴリ0件）は、data/goodmax.json を更新せず、
+# ジョブを失敗させる。→ 前回の正常なデータが配信され続け、ActionsのタブとメールでPCに気づける。
+#
+# 既存の update-data.yml（1日1回）とは別ワークフロー。同じリポジトリへ同時にpushしても衝突しないよう、
+# concurrency と「pull --rebase → push」の再試行を入れている。
+
+name: Update GOOD Max data
+
+on:
+  schedule:
+    # 毎時17分（UTC）。正時ちょうどはGitHub側が混み、遅延しやすいのでずらしている。
+    - cron: "17 * * * *"
+  workflow_dispatch: {} # 手動実行も可能（Actionsタブ → Run workflow）
+
+permissions:
+  contents: write
+
+# 同じグループのジョブは1つずつ順番に実行（古い実行を途中で止めない）
+concurrency:
+  group: data-push
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch GOOD Max JSON from GAS
+        env:
+          GAS_URL: ${{ secrets.GAS_URL }}
+        run: |
+          set -e
+          mkdir -p data
+          tmp="$(mktemp)"
+
+          ok=0
+          for i in 1 2 3; do
+            if curl -fsSL --max-time 180 "${GAS_URL}?type=goodmax" -o "$tmp"; then
+              # 検査: 「カテゴリの配列」であること。
+              #   [{"id":"mixnuts","products":[...]}, ...]
+              # GASのエラー {"error":...} や、壊れたデータで正常なJSONを上書きしないため。
+              if jq -e 'type == "array" and length > 0 and all(.[]; (.id | type == "string") and (.products | type == "array"))' "$tmp" >/dev/null 2>&1; then
+                ok=1
+                break
+              fi
+              echo "invalid JSON (retry $i): $(head -c 200 "$tmp")"
+            else
+              echo "curl failed (retry $i)"
+            fi
+            sleep 15
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "FAILED: goodmax の取得または検査に失敗しました。data/goodmax.json は更新しません（前回のデータを維持）"
+            exit 1
+          fi
+
+          # 全カテゴリが0件は異常とみなす（一部カテゴリが0件なのは正常：在庫切れなど）
+          total="$(jq '[.[].products | length] | add' "$tmp")"
+          if [ "$total" -le 0 ]; then
+            echo "FAILED: 全カテゴリの商品が0件です。data/goodmax.json は更新しません"
+            exit 1
+          fi
+
+          # 整形して保存（差分が読みやすくなる）
+          jq '.' "$tmp" > data/goodmax.json
+          echo "OK: goodmax.json ($(wc -c < data/goodmax.json) bytes, 商品 ${total} 件)"
+
+          # Jekyll処理を無効化（JSONをそのまま配信）。既にあれば何も変わらない
+          touch .nojekyll
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/goodmax.json .nojekyll
+          if git diff --cached --quiet; then
+            echo "変更なし（コミットしません）"
+            exit 0
+          fi
+          git commit -m "data: GOOD Max 自動更新 $(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          # 別のワークフロー（1日1回の更新）と同時に動いたときの衝突に備えて再試行する
+          for i in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push 失敗 (retry $i): 最新を取り込んで再試行します"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            sleep 5
+          done
+          echo "FAILED: push に失敗しました"
+          exit 1
